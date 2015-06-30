@@ -34,7 +34,7 @@ From the victim's perspective, the attack makes use in three phases:
 
 ## Requirements
 * Kali Linux.
-* Two wireless network interfaces, one capable of injection.
+* Two wireless network adapters; one capable of injection.
 
 ## Help needed
 If you are a Python developer or a web designer you can help us improve wifiphisher. Feel free to take a look at the bug tracker for some tasks to do.
@@ -48,6 +48,9 @@ href="https://github.com/DanMcInerney/fakeAP">fakeAP</a>.
 
 ## License
 Wifiphisher is licensed under the MIT license. See [LICENSE](LICENSE) for more information.
+
+## Version
+Current version is **1.1**.
 
 [![alt text][1.1]][1]
 [1.1]: http://i.imgur.com/tXSoThF.png (Follow me)
